@@ -1,68 +1,97 @@
-import logging
+import telebot
+from flask import Flask, request
+from datetime import datetime
+import os
 
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+# Bot tokenini kiritish
+TOKEN = "6722967814:AAH0-xziAMxRHl8C85jPuWwXpsYp-b8qXRY"
+bot = telebot.TeleBot(TOKEN)
 
-# Enable logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
+# Webhook sozlamalari
+WEBHOOK_SECRET = "jikojiko"  # Maxfiy yo'l
+WEBHOOK_URL = f"https://jikko.herokuapp.com/{WEBHOOK_SECRET}"
 
-logger = logging.getLogger(__name__)
+# Flask ilovasini yaratish
+app = Flask(__name__)
 
+# Ma'lumotlarni saqlash uchun fayllar
+PASS_USER_FILE = "pass_user.txt"
+CHAT_DIR = "messages"  # Xabarlar saqlanadigan katalog
 
-# Define a few command handlers. These usually take the two arguments update and
-# context. Error handlers also receive the raised TelegramError object in error.
-def start(update, context):
-    """Send a message when the command /start is issued."""
-    update.message.reply_text('Hey this is your bot!')
+# Foydalanuvchilar va parollarni saqlash
+user_passwords = {}  # Foydalanuvchi ID va ularning parollari
+password_groups = {}  # Parollar va ularning foydalanuvchi ID-lari
 
+# Fayllarni yaratish (agar mavjud bo'lmasa)
+os.makedirs(CHAT_DIR, exist_ok=True)
+if not os.path.exists(PASS_USER_FILE):
+    with open(PASS_USER_FILE, "w") as f:
+        f.write("UserID,Password\n")
 
-def help(update, context):
-    """Send a message when the command /help is issued."""
-    update.message.reply_text('Currently I am in Alpha stage, help me also!')
+# Fayldan foydalanuvchilar va parollarni yuklash
+def load_users():
+    global user_passwords, password_groups
+    if os.path.exists(PASS_USER_FILE):
+        with open(PASS_USER_FILE, "r") as f:
+            for line in f.readlines()[1:]:  # Birinchi qatorni o'tkazib yuborish
+                if line.strip():
+                    user_id, password = line.strip().split(",")
+                    user_id = int(user_id)
+                    user_passwords[user_id] = password
+                    password_groups.setdefault(password, []).append(user_id)
 
-def piracy(update, context):
-    update.message.reply_text('Ahhan, FBI wants to know your location!')
+# Foydalanuvchilarni fayldan yuklash
+load_users()
 
+# "/start" komandasi
+@bot.message_handler(commands=["start"])
+def handle_start(message):
+    user_id = message.from_user.id
+    if user_id not in user_passwords:
+        bot.send_message(user_id, "Botdan foydalanish uchun parolni kiriting:")
+    else:
+        bot.send_message(user_id, "Botga xush kelibsiz! Siz parolni allaqachon kiritgansiz.")
 
-def echo(update, context):
-    """Echo the user message."""
-    update.message.reply_text(update.message.text)
+# Parolni qabul qilish
+@bot.message_handler(func=lambda message: message.from_user.id not in user_passwords)
+def handle_password(message):
+    user_id = message.from_user.id
+    password = message.text.strip()
+    user_passwords[user_id] = password
+    password_groups.setdefault(password, []).append(user_id)
+    with open(PASS_USER_FILE, "a") as f:
+        f.write(f"{user_id},{password}\n")
+    bot.send_message(user_id, "Parolingiz qabul qilindi! Endi siz xabar almashishingiz mumkin.")
 
+# Xabarlarni saqlash
+@bot.message_handler(func=lambda message: message.from_user.id in user_passwords)
+def handle_message(message):
+    user_id = message.from_user.id
+    user_password = user_passwords[user_id]
+    save_message_to_file(user_password, user_id, message.text)
+    bot.send_message(user_id, "Xabaringiz saqlandi!")
 
-def error(update, context):
-    """Log Errors caused by Updates."""
-    logger.warning('Update "%s" caused error "%s"', update, context.error)
+# Xabarlarni saqlash funksiyasi
+def save_message_to_file(password, sender_id, message):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    file_path = os.path.join(CHAT_DIR, f"{password}.txt")
+    with open(file_path, "a") as f:
+        f.write(f"{timestamp} - {sender_id}: {message}\n")
 
+# Webhook endpoint
+@app.route(f"/{WEBHOOK_SECRET}", methods=["POST"])
+def webhook():
+    update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
+    bot.process_new_updates([update])
+    return "OK", 200
 
-def main():
-    """Start the bot."""
-    # Create the Updater and pass it your bot's token.
-    # Make sure to set use_context=True to use the new context based callbacks
-    # Post version 12 this will no longer be necessary
-    updater = Updater("//TOKEN//", use_context=True)
+# Flask ilovasining asosiy sahifasi
+@app.route("/")
+def index():
+    return "Bot ishlamoqda!"
 
-    # Get the dispatcher to register handlers
-    dp = updater.dispatcher
-
-    # on different commands - answer in Telegram
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help))
-    dp.add_handler(CommandHandler("piracy", piracy))
-
-    # on noncommand i.e message - echo the message on Telegram
-    dp.add_handler(MessageHandler(Filters.text, echo))
-
-    # log all errors
-    dp.add_error_handler(error)
-
-    # Start the Bot
-    updater.start_polling()
-
-    # Run the bot until you press Ctrl-C or the process receives SIGINT,
-    # SIGTERM or SIGABRT. This should be used most of the time, since
-    # start_polling() is non-blocking and will stop the bot gracefully.
-    updater.idle()
-
-
-if __name__ == '__main__':
-    main()
+# Webhookni sozlash
+if __name__ == "__main__":
+    bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
